@@ -8,13 +8,13 @@
 
 所以View的树状结构关系所呈现的如下
 
-![](D:\ToBeAProfessionalAndroidDeveloper\AndroidStudy\Android 基础\view\view1.png)
+![](view1.png)
 
 做过Android的同学都知道，写布局文件的时候，ViewGroup和View都是层层嵌套的，他们是如何展示到屏幕上面来的呢？可以看到View是树状的，由于树的特性，View的展示过程是从上到下逐级别绘制，可以说每一个有视图Activity都包含一个View Tree来描述呈现在屏幕上的View关系，这让开发者可以更好的定位到每一个 View 的位置。同时，View 的绘制起点并不是我们所定义的那一个XML视图文件，在其外层还有系统所提供的一层东西所包裹，那这层是什么东西呢？
 
 ### 顶层布局
 
-![](D:\ToBeAProfessionalAndroidDeveloper\AndroidStudy\Android 基础\view\view2.png)
+![](view2.png)
 
 我们都知道在Activity的OnCreate方法中需要实现setContentView方法来绑定我们的实现的布局，那么绑定的局部又是绑定在什么地方呢？直接绑定在Activity上吗？这就需要看源码来分析了
 
