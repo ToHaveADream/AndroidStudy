@@ -186,3 +186,241 @@ for (int i=0; i<=20; i++)
 ------
 
 3)旋转（rotate)
+
+旋转提供了两种方法：
+
+```java
+public void rotate (float degrees)
+
+public final void rotate (float degrees, float px, float py)
+```
+
+和缩放一样，第二种方法多出来的两个参数依旧是控制旋转中心点的。
+
+默认的旋转中心依旧是坐标原点：
+
+```java
+// 将坐标系原点移动到画布正中心
+canvas.translate(mWidth / 2, mHeight / 2);
+
+RectF rect = new RectF(0,-400,400,0);   // 矩形区域
+
+mPaint.setColor(Color.BLACK);           // 绘制黑色矩形
+canvas.drawRect(rect,mPaint);
+
+canvas.rotate(180);                     // 旋转180度 <-- 默认旋转中心为原点
+
+mPaint.setColor(Color.BLUE);            // 绘制蓝色矩形
+canvas.drawRect(rect,mPaint);
+```
+
+![](canvas-scale-06.PNG)
+
+改变旋转中心位置：
+
+```java
+// 将坐标系原点移动到画布正中心
+canvas.translate(mWidth / 2, mHeight / 2);
+
+RectF rect = new RectF(0,-400,400,0);   // 矩形区域
+
+mPaint.setColor(Color.BLACK);           // 绘制黑色矩形
+canvas.drawRect(rect,mPaint);
+
+canvas.rotate(180,200,0);               // 旋转180度 <-- 旋转中心向右偏移200个单位
+
+mPaint.setColor(Color.BLUE);            // 绘制蓝色矩形
+canvas.drawRect(rect,mPaint);  //旋转的为canvas画布的坐标系
+```
+
+![](canvas-scale-07.PNG)
+
+旋转也可以是叠加的：
+
+```java
+canvas.rotate(180);
+canvas.rotate(20);
+```
+
+调整两次旋转，实际的旋转角度为180 + 20 = 200度
+
+为了演示这个效果，如下所示：
+
+```javascript
+// 将坐标系原点移动到画布正中心
+canvas.translate(mWidth / 2, mHeight / 2);
+
+canvas.drawCircle(0,0,400,mPaint);          // 绘制两个圆形
+canvas.drawCircle(0,0,380,mPaint);
+
+for (int i=0; i<=360; i+=10){               // 绘制圆形之间的连接线
+   canvas.drawLine(0,380,0,400,mPaint);
+   canvas.rotate(10);
+}
+```
+
+![](canvas-scale-08.PNG)
+
+4）错切（skew)
+
+skew这里翻译为错切，错切是特殊类型的线性变换
+
+错切只提供了一种方法：
+
+```java
+public void skew (float sx, float sy)
+```
+
+参数含义：
+
+float sx:将画布在x方向上倾斜相应的角度，sx倾斜角度的tan值
+
+float sy:将画布在y轴方向上倾斜相应的角度，sy为倾斜角度的tan值
+
+变换后：
+
+```java
+X = x +sx * y
+Y = y + sy * x
+```
+
+如下所示：
+
+```java
+// 将坐标系原点移动到画布正中心
+canvas.translate(mWidth / 2, mHeight / 2);
+
+RectF rect = new RectF(0,0,200,200);   // 矩形区域
+
+mPaint.setColor(Color.BLACK);           // 绘制黑色矩形
+canvas.drawRect(rect,mPaint);
+
+canvas.skew(1,0);                       // 水平错切 <- 45度
+
+mPaint.setColor(Color.BLUE);            // 绘制蓝色矩形
+canvas.drawRect(rect,mPaint);
+```
+
+![](canvas-scale-09.PNG)
+
+如你所想，错切也是可叠加的，不过请注意，调用次序不同绘制结果也不同
+
+```java
+// 将坐标系原点移动到画布正中心
+canvas.translate(mWidth / 2, mHeight / 2);
+
+RectF rect = new RectF(0,0,200,200);   // 矩形区域
+
+mPaint.setColor(Color.BLACK);           // 绘制黑色矩形
+canvas.drawRect(rect,mPaint);
+
+canvas.skew(1,0);                       // 水平错切
+canvas.skew(0,1);                       // 垂直错切
+
+mPaint.setColor(Color.BLUE);            // 绘制蓝色矩形
+canvas.drawRect(rect,mPaint);
+```
+
+![](canvas-scale-10.PNG)
+
+5)快照（save)和回滚（restore)
+
+Q:为什么存在快照和回滚
+
+A:画布的操作是不可逆的，而且很多画布操作会影响后续的步骤，例如第一个例子，两个圆形都是在坐标原点绘制的，而因为坐标系的移动绘制出来的实际位置不同。所以会对画布的状态进行保存和回滚
+
+**与之相关的API**
+
+| 相关API        | 简介                                                         |
+| -------------- | ------------------------------------------------------------ |
+| save           | 把当前画布的状态进行保存，然后放入特定的栈中                 |
+| saveLayerxxx   | 新建一个图层，并放入特定的栈中                               |
+| restore        | 把栈中最顶层的画布状态取出来，并按照这个状态恢复当前的画布   |
+| restoreToCount | 弹出指定位置及其以上的所有的状态，并按照指定位置的状态进行恢复 |
+| getSaveCount   | 获取栈中内容的数量（即保存的次数）                           |
+
+下面对其中的一些概念和方法进行分析：
+
+**状态栈**：
+
+![](canvas-state-01.PNG)
+
+这个栈可以存储画布状态和图层状态
+
+**Q:什么是画布状态和图层状态**
+
+A:实际上我们看到的画布是由多个图层构成的，如下图：
+
+![](canvas-state-02.PNG)
+
+实际上我们之前讲解的绘制操作和画布操作都是在默认图层上面进行的。在通常情况下，使用默认图层就可以满足需求，但是如果需要绘制比较复杂的内容；如地图（地图可以由多个图层叠加而成，比如：道路图、政区层），则分图层绘制比较好一点：
+
+你可以把这个图层看作是一层一层的玻璃板，你在每层玻璃板上绘制内容、然后把这些玻璃板叠起来看就是最终效果。
+
+### SaveFlags:
+
+| 名称                       | 简介                                            |
+| -------------------------- | ----------------------------------------------- |
+| ALL_SAVE_FLAG              | 默认，保存全部状态                              |
+| CLIP_SAVE_FLAG             | 保存剪辑区                                      |
+| CLIP_TO_LAYER_SAVE_FLAG    | 剪辑区作为图层保存                              |
+| FULL_COLOR_LAYER_SAVE_FLAG | 保存图层的全部色彩通道                          |
+| HAS_ALPHA_LAYER_SAVE_FLAG  | 保存图层的alpha(不透明度)通道                   |
+| MATRIX_SAVE_FLAG           | 保存Matrix信息( translate, rotate, scale, skew) |
+
+save
+
+save由两种方法：
+
+```java
+// 保存全部状态
+public int save ()
+
+// 根据saveFlags参数保存一部分状态
+public int save (int saveFlags)
+```
+
+可以看到第二种方法比第一个方法多了一个saveFlags参数，使用这个参数可以只保存一部分状态，更加灵活，这个saveFlags参数具体可以参考上面表格中的内容。
+
+每调用一次save方法，都会在栈顶添加一条状态信息，以上面状态栈图片为例，再调用一次save则会在第5次上面再添加一条状态。
+
+saveLayerXXX
+
+saveLayerxxx有比较多的方法
+
+```java
+// 无图层alpha(不透明度)通道
+public int saveLayer (RectF bounds, Paint paint)
+public int saveLayer (RectF bounds, Paint paint, int saveFlags)
+public int saveLayer (float left, float top, float right, float bottom, Paint paint)
+public int saveLayer (float left, float top, float right, float bottom, Paint paint, int saveFlags)
+
+// 有图层alpha(不透明度)通道
+public int saveLayerAlpha (RectF bounds, int alpha)
+public int saveLayerAlpha (RectF bounds, int alpha, int saveFlags)
+public int saveLayerAlpha (float left, float top, float right, float bottom, int alpha)
+public int saveLayerAlpha (float left, float top, float right, float bottom, int alpha, int saveFlags)
+```
+
+> saveLayerxxx方法会让你花费更多的时间去渲染图像（图层多了相互之间叠加会导致计算量成倍增长），使用前请谨慎，如果可能，尽量避免使用
+
+使用saveLayerxxx方法，也会将图层状态放入状态栈中，同样使用restore方法进行恢复
+
+**restore**
+
+状态回滚，就是从栈顶取出一个状态然后根据内容进行恢复
+
+同样以上面状态栈图片为例，调用一次restore方法则将恢复状态栈中第5此取出，根据里面保存的状态进行恢复
+
+**restoreToCount**
+
+弹出指定位置以及以上所有的状态，并根据指定位置状态进行恢复
+
+以上图进行示例，如果调用restoreToCount（2）则会弹出2 3 4 5的状态，并根据第2次保存的状态进行恢复
+
+**getSaveCount **
+
+获取保存的次数，即状态栈中保存状态的数量，以上面状态图片为例，使用该函数的返回值为5
+
+不过请注意，该函数的最小返回值为1，即使弹出了所有的状态，返回值依旧为1，代表默认状态
+
