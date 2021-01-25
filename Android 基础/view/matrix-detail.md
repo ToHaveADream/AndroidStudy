@@ -361,7 +361,7 @@ mapPoints: [600.0, 900.0]
 
 **Matrix 相关的重要知识：**
 
-- 1.一开始从Canvas中获取到到Matrix并不是初始矩阵，而是经过偏移后到矩阵，且偏移距离就是距离屏幕左上角的位置。
+- 1.**一开始从Canvas中获取到到Matrix并不是初始矩阵，而是经过偏移后到矩阵，且偏移距离就是距离屏幕左上角的位置**。
 
 - > 这个可以用于判定View在屏幕上的绝对位置，View可以根据所处位置做出调整。
 
@@ -389,3 +389,400 @@ boolean setPolyToPoly (
 ```
 
 Poly全称是Polygon，多边形的意思，了解了意思大致就能知道这个方法是做什么用的了，应该与PS中自由变换中的扭曲有点类似。
+
+![](/picture/matrix-01.gif)
+
+> 从参数我们可以了解到setPolyToPoly最多可以支持4个点。这四个点通常为图形的四个角，可以通过这四个角将视图从矩形变换成其他形状
+
+简单示例：
+
+```java
+public class MatrixSetPolyToPolyTest extends View {
+
+    private Bitmap mBitmap;             // 要绘制的图片
+    private Matrix mPolyMatrix;         // 测试setPolyToPoly用的Matrix
+
+    public MatrixSetPolyToPolyTest(Context context) {
+        super(context);
+
+        initBitmapAndMatrix();
+    }
+
+    private void initBitmapAndMatrix() {
+        mBitmap = BitmapFactory.decodeResource(getResources(),
+                R.drawable.poly_test);
+
+        mPolyMatrix = new Matrix();
+
+
+        float[] src = {0, 0,                                    // 左上
+                mBitmap.getWidth(), 0,                          // 右上
+                mBitmap.getWidth(), mBitmap.getHeight(),        // 右下
+                0, mBitmap.getHeight()};                        // 左下
+
+        float[] dst = {0, 0,                                    // 左上
+                mBitmap.getWidth(), 400,                        // 右上
+                mBitmap.getWidth(), mBitmap.getHeight() - 200,  // 右下
+                0, mBitmap.getHeight()};                        // 左下
+
+        // 核心要点
+        mPolyMatrix.setPolyToPoly(src, 0, dst, 0, src.length >> 1); // src.length >> 1 为位移运算 相当于处以2
+
+        // 此处为了更好的显示对图片进行了等比缩放和平移(图片本身有点大)
+        mPolyMatrix.postScale(0.26f, 0.26f);
+        mPolyMatrix.postTranslate(0,200);
+    }
+
+    @Override
+    protected void onDraw(Canvas canvas) {
+        super.onDraw(canvas);
+
+        // 根据Matrix绘制一个变换后的图片
+        canvas.drawBitmap(mBitmap, mPolyMatrix, null);
+    }
+}
+```
+
+![](/picture/matrix-10.jpg)
+
+接下来讨论最后一个参数的含义：
+
+我们知道`pointCount`支持点的个数为0到4个，四个一般指图形的四个角，属于最常见的一种情形，但前面几种是是什么情况呢？
+
+| pointCount | 摘要                                        |
+| ---------- | ------------------------------------------- |
+| 0          | 相当于`reset`                               |
+| 1          | 相当于`translate`                           |
+| 2          | 可以进行 缩放、旋转、平移 变换              |
+| 3          | 可以进行 缩放、旋转、平移、错切 变换        |
+| 4          | 可以进行 缩放、旋转、平移、错切以及任何形变 |
+
+> 从上表我们可以观察出一个规律, 随着`pointCount`数值增大setPolyToPoly的可以操作性也越来越强，这不是废话么，可调整点数多了能干的事情自然也多了。
+>
+> 只列一个表格就算交代完毕了显得诚意不足，为了彰显诚意，接下来详细的讲解一下。
+
+**为什么说前面几种情况在实际开发中很少出现?**
+
+作为开发人员，写出来的代码出了要让机器"看懂"，没有歧义之外，最重要的还是让人看懂，以方便后期的维护修改，从上边的表格中可以看出，前面的几种种情况都可以有更直观的替代方法，只有四个参数的情况下的特殊形变是没有替代方法的。
+
+**测控点选取位置?**
+
+测控点可以选择任何你认为方便的位置，只要src与dst一一对应即可。不过为了方便，通常会选择一些特殊的点： 图形的四个角，边线的中心点以及图形的中心点等。**不过有一点需要注意，测控点选取都应当是不重复的(src与dst均是如此)，如果选取了重复的点会直接导致测量失效，这也意味着，你不允许将一个方形(四个点)映射为三角形(四个点，但其中两个位置重叠)，但可以接近于三角形。**。
+
+**作用范围?**
+
+作用范围当然是设置了Matrix的全部区域，如果你将这个Matrix赋值给了Canvas，它的作用范围就是整个画布，如果你赋值给了Bitmap，它的作用范围就是整张图片。
+
+**接下来用示例演示一下，所有示例的src均为图片大小，dst根据手势变化。**
+
+**pointCount为0**
+
+pointCount为0和`reset`是等价的，而不是保持matrix不变，在最底层的实现中可以看到这样的代码：
+
+```java
+if (0 == count) {
+    this->reset();
+    return true;
+}
+```
+
+![](/picture/matrix-02.gif)
+
+**pointCount为1**
+
+pointCount为0和`translate`是等价的，在最底层的实现中可以看到这样的代码：
+
+```
+if (1 == count) {
+    this->setTranslate(dst[0].fX - src[0].fX, dst[0].fY - src[0].fY);
+    return true;
+}
+```
+
+> 平移的距离是dst - src.
+
+当测控点为1的时候，由于你只有一个点可以控制，所以你只能拖拽着它在2D平面上滑动。
+
+![](/picture/matrix-03.gif)
+
+**pointCount为2**
+
+当pointCount为2的时候，可以做缩放、平移和旋转
+
+![](/picture/matirx-04.gif)
+
+**pointCount为3**
+
+当pointCount为3的时候，可以做缩放、平移、旋转和错切
+
+![](/picture/matirx-05.gif)
+
+**pointCount为4**
+
+当pointCount为4的时候，你可以将图像拉伸为任意四边形
+
+![](/picture/matrix-06.gif)
+
+#### 2.setRectToRect
+
+```
+boolean setRectToRect (RectF src, 			// 源区域
+                RectF dst, 					// 目标区域
+                Matrix.ScaleToFit stf)		// 缩放适配模式
+```
+
+简单来说就是将源矩形的内容填充到目标矩形中，然而在大多数的情况下，源矩形和目标矩形的长宽比是不一致的，到底该如何填充呢，这个填充的模式就由第三个参数 `stf` 来确定。
+
+ScaleToFit 是一个枚举类型，共包含了四种模式:
+
+| 模式   | 摘要                                           |
+| ------ | ---------------------------------------------- |
+| CENTER | 居中，对src等比例缩放，将其居中放置在dst中。   |
+| START  | 顶部，对src等比例缩放，将其放置在dst的左上角。 |
+| END    | 底部，对src等比例缩放，将其放置在dst的右下角。 |
+| FILL   | 充满，拉伸src的宽和高，使其完全填充满dst。     |
+
+下面我们看一下不同宽高比的src与dst在不同模式下是怎样的。
+
+> 假设灰色部分是dst，橙色部分是src，由于是测试不同宽高比，示例中让dst保持不变，看两种宽高比的src在不同模式下填充的位置
+
+| src（原始状态） |                              |
+| --------------- | ---------------------------- |
+| src             | ![](/picture/matrix1-01.jpg) |
+| center          | ![](/picture/matrix1-02.jpg) |
+| start           | ![](/picture/matrix1-03.jpg) |
+| end             | ![](/picture/matrix1-04.jpg) |
+| fill            | ![](/picture/matrix1-05.jpg) |
+
+下面演示一下居中的示例：
+
+```java
+public class MatrixSetRectToRectTest extends View {
+
+    private static final String TAG = "MatrixSetRectToRectTest";
+
+    private int mViewWidth, mViewHeight;
+
+    private Bitmap mBitmap;             // 要绘制的图片
+    private Matrix mRectMatrix;         // 测试etRectToRect用的Matrix
+
+    public MatrixSetRectToRectTest(Context context) {
+        super(context);
+
+        mBitmap = BitmapFactory.decodeResource(getResources(), R.drawable.rect_test);
+        mRectMatrix = new Matrix();
+    }
+
+    @Override
+    protected void onSizeChanged(int w, int h, int oldw, int oldh) {
+        super.onSizeChanged(w, h, oldw, oldh);
+        mViewWidth = w;
+        mViewHeight = h;
+
+    }
+
+    @Override
+    protected void onDraw(Canvas canvas) {
+        super.onDraw(canvas);
+
+        RectF src= new RectF(0, 0, mBitmap.getWidth(), mBitmap.getHeight() );
+        RectF dst = new RectF(0, 0, mViewWidth, mViewHeight );
+
+        // 核心要点
+        mRectMatrix.setRectToRect(src,dst, Matrix.ScaleToFit.CENTER);
+
+        // 根据Matrix绘制一个变换后的图片
+        canvas.drawBitmap(mBitmap, mRectMatrix, new Paint());
+    }
+}
+```
+
+![](/picture/matrix1-06.jpg)
+
+#### 3.rectStaysRect
+
+判断矩形经过变换后是否仍为矩形，假如Matrix进行了平移、缩放则画布仅仅是位置和大小改变，矩形变换后仍然为矩形，但Matrix进行了非90度倍数的旋转或者错切，则矩形变换后就不再是矩形了，这个很好理解，不过多赘述，顺便说一下，前面的`mapRect`方法的返回值就是根据`rectStaysRect`来判断的。
+
+#### 4.setSinCos
+
+设置sinCos值，这个是控制Matrix旋转的，由于Matrix已经封装好了Rotate方法，所以这个并不常用，在此仅作概述。
+
+```
+// 方法一
+void setSinCos (float sinValue, 	// 旋转角度的sin值
+                float cosValue)		// 旋转角度的cos值
+
+// 方法二
+void setSinCos (float sinValue, 	// 旋转角度的sin值
+                float cosValue, 	// 旋转角度的cos值
+                float px, 			// 中心位置x坐标
+                float py)			// 中心位置y坐标
+```
+
+简单测试:
+
+```
+Matrix matrix = new Matrix();
+// 旋转90度
+// sin90=1
+// cos90=0
+matrix.setSinCos(1f, 0f);
+
+Log.i(TAG, "setSinCos:"+matrix.toShortString());
+
+// 重置
+matrix.reset();
+
+// 旋转90度
+matrix.setRotate(90);
+
+Log.i(TAG, "setRotate:"+matrix.toShortString());
+```
+
+结果:
+
+```
+setSinCos:[0.0, -1.0, 0.0][1.0, 0.0, 0.0][0.0, 0.0, 1.0]
+setRotate:[0.0, -1.0, 0.0][1.0, 0.0, 0.0][0.0, 0.0, 1.0]
+```
+
+### 矩阵相关
+
+矩阵相关的函数就属于哪一种非常靠近底层的东西了，大部分开发者很少直接接触这些东西，想要弄明白这个可以回去请教你们的线性代数老师，这里也仅作概述。
+
+| 方法       | 摘要                                                 |
+| ---------- | ---------------------------------------------------- |
+| invert     | 求矩阵的逆矩阵                                       |
+| isAffine   | 判断当前矩阵是否为仿射矩阵，API21(5.0)才添加的方法。 |
+| isIdentity | 判断当前矩阵是否为单位矩阵。                         |
+
+#### 1.invert
+
+求矩阵的逆矩阵，简而言之就是计算与之前相反的矩阵，如果之前是平移200px，则求的矩阵为反向平移200px，如果之前是缩小到0.5f，则结果是放大到2倍。
+
+```
+boolean invert (Matrix inverse)
+```
+
+简单测试:
+
+```
+Matrix matrix = new Matrix();
+Matrix invert = new Matrix();
+matrix.setTranslate(200,500);
+
+Log.e(TAG, "before - matrix "+matrix.toShortString() );
+
+Boolean result = matrix.invert(invert);
+
+Log.e(TAG, "after  - result "+result );
+Log.e(TAG, "after  - matrix "+matrix.toShortString() );
+Log.e(TAG, "after  - invert "+invert.toShortString() );
+```
+
+结果：
+
+```
+before - matrix [1.0, 0.0, 200.0][0.0, 1.0, 500.0][0.0, 0.0, 1.0]
+after  - result true
+after  - matrix [1.0, 0.0, 200.0][0.0, 1.0, 500.0][0.0, 0.0, 1.0]
+after  - invert [1.0, 0.0, -200.0][0.0, 1.0, -500.0][0.0, 0.0, 1.0]
+```
+
+#### 2.isAffine
+
+判断矩阵是否是仿射矩阵, 貌似并没有太大卵用，因为你无论如何操作结果始终都为true。
+
+这是为什么呢？因为迄今为止我们使用的所有变换都是仿射变换，那变换出来的矩阵自然是仿射矩阵喽。
+
+判断是否是仿射矩阵最重要的一点就是，直线是否仍为直线，简单想一下就知道，不论平移，旋转，错切，缩放，直线变换后最终仍为直线，要想让`isAffine`的结果变为false，除非你能把直线掰弯，我目前还没有找到能够掰弯的方法，所以我仍是直男(就算找到了，我依旧是直男)。
+
+简单测试:
+
+```
+Matrix matrix = new Matrix();
+Log.i(TAG,"isAffine="+matrix.isAffine());
+
+matrix.postTranslate(200,0);
+matrix.postScale(0.5f, 1);
+matrix.postSkew(0,1);
+matrix.postRotate(56);
+
+Log.i(TAG,"isAffine="+matrix.isAffine());
+```
+
+结果:
+
+```
+isAffine=true
+isAffine=true
+```
+
+#### 3.isIdentity
+
+判断是否为单位矩阵，什么是单位矩阵呢，就是文章一开始的那个:
+
+新创建的Matrix和重置后的Matrix都是单位矩阵，不过，只要随意操作一步，就不在是单位矩阵了。
+
+简单测试：
+
+```
+Matrix matrix = new Matrix();
+Log.i(TAG,"isIdentity="+matrix.isIdentity());
+
+matrix.postTranslate(200,0);
+
+Log.i(TAG,"isIdentity="+matrix.isIdentity());
+```
+
+结果：
+
+```
+isIdentity=true
+isIdentity=false
+```
+
+## Matrix实用技巧
+
+通过前面的代码和示例，我们已经了解了Matrix大部分方法是如何使用的，这些基本的原理和方法通过组合可能会创造出神奇的东西，网上有很多教程讲Bitmap利用Matrix变换来制作镜像倒影等，这都属于Matrix的基本应用，我就不在赘述了，下面我简要介绍几种然并卵的小技巧，更多的大家可以开启自己的脑洞来发挥。
+
+### 1.获取View在屏幕上的绝对位置
+
+在之前的文章[Matrix原理](http://www.gcssloop.com/2015/02/Matrix_Basic/)中我们提到过Matrix最根本的作用就是坐标映射，将View的相对坐标映射为屏幕的绝对坐标，也提到过我们在onDraw函数的canvas中获取到到Matrix并不是单位矩阵，结合这两点，聪明的你肯定想到了我们可以从canvas的Matrix入手取得View在屏幕上的绝对位置。
+
+不过，这也仅仅是一个然并卵的小技巧而已，使用`getLocationOnScreen`同样可以获取View在屏幕的位置，但如果你是想让下一任接盘侠弄不明白你在做什么或者是被同事打死的话，尽管这么做。
+
+简单示例:
+
+```
+@Override
+protected void onDraw(Canvas canvas) {
+    float[] values = new float[9];
+    int[] location1 = new int[2];
+
+    Matrix matrix = canvas.getMatrix();
+    matrix.getValues(values);
+
+    location1[0] = (int) values[2];
+    location1[1] = (int) values[5];
+    Log.i(TAG, "location1 = " + Arrays.toString(location1));
+
+    int[] location2 = new int[2];
+    this.getLocationOnScreen(location2);
+    Log.i(TAG, "location2 = " + Arrays.toString(location2));
+}
+```
+
+结果:
+
+```
+location1 = [0, 243]
+location2 = [0, 243]
+```
+
+### 2.利用setPolyToPoly制造3D效果
+
+这个全凭大家想象力啦，不过我搜了一下还真搜到了好东西，之前鸿洋大大发过一篇博文详细讲解了利用setPolyToPoly制造的折叠效果布局，大家直接到他的博客去看吧，我就不写了。
+
+![](/picture/matirx-20.gif)
+
