@@ -799,7 +799,35 @@ public Activity newActivity(ClassLoader cl, String className,
 
 8、最后一步，通过 AppComponentFactory 工厂创建实例
 
-
+```java
+/frameworks/support/compat/src/main/java/androidx/core/app/AppComponentFactory.java
+//其实就相当于直接返回instantiateActivityCompat
+public final Activity instantiateActivity(ClassLoader cl, String className, Intent intent)
+    throws InstantiationException, IllegalAccessException, ClassNotFoundException {
+    return checkCompatWrapper(instantiateActivityCompat(cl, className, intent));
+}
+       
+//泛型方法
+static <T> T checkCompatWrapper(T obj) {
+        if (obj instanceof CompatWrapped) {
+            T wrapper = (T) ((CompatWrapped) obj).getWrapper();
+            if (wrapper != null) {
+                return wrapper;
+            }
+        }
+        return obj;
+    }  
+//终于到了尽头了。利用类加载器来进行实例化。到此activity的启动就告一段落了。
+public @NonNull Activity instantiateActivityCompat(@NonNull ClassLoader cl,
+        @NonNull String className, @Nullable Intent intent)
+        throws InstantiationException, IllegalAccessException, ClassNotFoundException {
+    try {
+        return (Activity) cl.loadClass(className).getDeclaredConstructor().newInstance();
+    } catch (InvocationTargetException | NoSuchMethodException e) {
+        throw new RuntimeException("Couldn't call constructor", e);
+    }
+}
+```
 
 
 
