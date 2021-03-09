@@ -281,6 +281,256 @@ public void setAsynchronous(boolean async) {
 
 **BUT！！！**，其实同步屏障对我们平常的使用是没有多大用处的。因为设置同步屏障和创建异步 Handler 的方法都标记为 hide，说明 Google 不想要我们去使用他。
 
+#### 移除同步屏障
+
+我们可以通过 removeSyncBarrier 方法来移除同步屏障。
+
+```java
+public void removeSyncBarrier(int token) {
+    // Remove a sync barrier token from the queue.
+    // If the queue is no longer stalled by a barrier then wake it.
+    synchronized (this) {
+        Message prev = null;
+        Message p = mMessages;
+        // 找到 target 为 null 且 token 相同的消息
+        while (p != null && (p.target != null || p.arg1 != token)) {
+            prev = p;
+            p = p.next;
+        }
+        if (p == null) {
+            throw new IllegalStateException("The specified message queue synchronization "
+                    + " barrier token has not been posted or has already been removed.");
+        }
+        final boolean needWake;
+        if (prev != null) {
+            prev.next = p.next;
+            needWake = false;
+        } else {
+            mMessages = p.next;
+            needWake = mMessages == null || mMessages.target != null;
+        }
+        p.recycleUnchecked();
+        // If the loop is quitting then it is already awake.
+        // We can assume mPtr != 0 when mQuitting is false.
+        if (needWake && !mQuitting) {
+            nativeWake(mPtr);
+        }
+    }
+```
+
+这里主要是将同步屏障从 MessageQueue 中移除，一般执行完了异步消息后就会通过该方法将同步屏障移除。
+
+最后若需要唤醒，调用了 nativeWake 方法。
+
+# 阻塞唤醒机制
+
+我们知道不断进行着循环时非常消耗资源的，有时我们的 消息是不需要马上就执行的，而是需要过一段时间，此时如果 Looper 仍然不断地循环是一种资源地浪费。
+
+因此 Handler 设计了这样一种阻塞唤醒机制使得在当下没有需要执行的消息时，将将 Looper 的 loop阻塞，直到下一个任务的执行时间到达或者一些特殊的情况下再将其唤醒，从而避免了上述的资源浪费。
+
+#### epoll
+
+这个阻塞唤醒机制时基于 Linux IO 多路复用机制 epoll 实现的，它可以同时监控多个资源描述符，当某个文件描述符就绪时，会通知对应程序进行读/写 操作。
+
+epoll 主要有三个方法，分别时
+
+epoll_create、epoll_ctl、epoll_wait
+
+##### epoll_create
+
+```java
+int epoll_create(int size)
+```
+
+其功能主要是创建一个 epoll 句柄并返回，传入的 size 代表监听的描述符的个数。
+
+##### epoll_ctl
+
+```java
+int epoll_ctl(int epfd, int op, int fd, struct epoll_event *event)；
+```
+
+其功能是对 epoll 事件进行注册，会对该 fd 执行对应的 op 操作，参数含义如下：
+
+epfd: epoll 的句柄值（也就是 epoll_create 的返回值）
+
+op：对 fd 执行的操作
+
+- EPOLL_CTL_ADD:注册 fd 到 epfd
+- EPOLL_CTL_DEL:从 epfd 中删除 fd
+- EPOLL_CTL_MOD:修改已注册的 fd 的监听事件
+
+fd:需要监听的文件描述符
+
+epoll_event：需要监听的事件
+
+epoll_event 是一个结构体，里面的 events 代表了对应文件操作符的操作。而 data 代表了用户可用的数据
+
+其中 events 可取下面几个值：
+
+- EPOLLIN ：表示对应的文件描述符可以读（包括对端SOCKET正常关闭）；
+- EPOLLOUT：表示对应的文件描述符可以写；
+- EPOLLPRI：表示对应的文件描述符有紧急的数据可读（这里应该表示有带外部数据来）；
+- EPOLLERR：表示对应的文件描述符发生错误；
+- EPOLLHUP：表示对应的文件描述符被挂断；
+- EPOLLET：将EPOLL设为边缘触发(Edge Triggered)模式，这是相对于水平触发(Level Triggered)来说的。
+- EPOLLONESHOT：只监听一次事件，当监听完这次事件之后，如果还需要继续监听这个socket的话，需要再次把这个socket加入到EPOLL队列里
+
+##### epoll_wait
+
+```java
+int epoll_wait(int epfd, struct epoll_event * events, int maxevents, int timeout);
+```
+
+其功能是等待事件的上报，参数含义如下：
+
+- epfd:epoll 的句柄值
+- events:从内核中得到的事件集合
+- maxevents：events 数量，不能超过 create 时的 size
+- timeout：超时时间
+
+当调用了该方法后，会进入阻塞状态，等待 epfd 上 IO 事件，若 epfd 监听的某个文件描述符发生前面指定的  event 时，就会进行回调，从而使得 epoll 被唤醒并返回需要处理的事件个数，若超过了 设定的超时时间，同样也会被唤醒并返回 0 避免一直阻塞。
+
+而 Handler 的阻塞唤醒机制就是基于上面的 epoll 的阻塞特性。
+
+#### native 初始化
+
+在 Java 中 的 MessageQueue 创建时会调用到 nativeInit 方法，在 native 层会创建 NativeMessageQueue 并返回其地址，之后都是通过这个地址来与该 NativeMessageQueue 进行通信（也就是 MessageQueue 中的 mPtr),而在 NativeMessageQueue 创建时又会创建 Native 层下的 Looper，我们看到 Native 下 的 Looper 的构造函数。
+
+```c++
+Looper::Looper(bool allowNonCallbacks) :
+        mAllowNonCallbacks(allowNonCallbacks), mSendingMessage(false),
+        mPolling(false), mEpollFd(-1), mEpollRebuildRequired(false),
+        mNextRequestSeq(0), mResponseIndex(0), mNextMessageUptime(LLONG_MAX) {
+    mWakeEventFd = eventfd(0, EFD_NONBLOCK); //构造唤醒事件的fd
+    AutoMutex _l(mLock);
+    rebuildEpollLocked(); 
+}
+```
+
+
+
+可以看到，它调用了 rebuildEpollLocked 方法对 epoll 进行初始化，看下其实现：
+
+```java
+void Looper::rebuildEpollLocked() {
+    if (mEpollFd >= 0) {
+        close(mEpollFd); 
+    }
+    mEpollFd = epoll_create(EPOLL_SIZE_HINT); 
+    struct epoll_event eventItem;
+    memset(& eventItem, 0, sizeof(epoll_event));
+    eventItem.events = EPOLLIN;
+    eventItem.data.fd = mWakeEventFd;
+    int result = epoll_ctl(mEpollFd, EPOLL_CTL_ADD, mWakeEventFd, & eventItem);
+
+    for (size_t i = 0; i < mRequests.size(); i++) {
+        const Request& request = mRequests.valueAt(i);
+        struct epoll_event eventItem;
+        request.initEventItem(&eventItem);
+        int epollResult = epoll_ctl(mEpollFd, EPOLL_CTL_ADD, request.fd, & eventItem);
+    }
+}
+```
+
+可以看到，这里首先关闭了旧的 epoll 描述符，之后又调用了 epol_create 创建了新的 epoll 描述符，然后进行了一些初始化后，讲 mWakeEventFd 及 mRequests 中的 fd 都注册到了 epoll 的描述符中，注册的事件都是 EPOLLIN。
+
+这意味着当这些文件描述符其中一个 发生了 IO之后，就会通知 epoll_wait 使其唤醒，那么我们猜测 Handler 的阻塞唤醒机制就是通过 epoll_wait 实现的。
+
+同时可以发现，Native 层也是存在 MessageQueue 和 Looper 的，也就是说 native 层实际上也有一套消息机制的。
+
+#### Native 阻塞实现
+
+我们看看阻塞，他的实现就在我们看到的 MessageQueue:next 方法中，当发现要返回的消息将来才会执行，则会计算出当下距离其要执行的时间还差多少毫秒，并调用 nativePollOnce 方法将返回的过程阻塞到指定的时间。
+
+NativePollOnce 显然是一个 native 方法，最后调用了到了 Looper 这个 native 层类的 pollOnce 方法。
+
+```java
+int Looper::pollOnce(int timeoutMillis, int* outFd, int* outEvents, void** outData) {
+    int result = 0;
+    for (;;) {
+        while (mResponseIndex < mResponses.size()) {
+            const Response& response = mResponses.itemAt(mResponseIndex++);
+            int ident = response.request.ident;
+            if (ident >= 0) {
+                int fd = response.request.fd;
+                int events = response.events;
+                void* data = response.request.data;
+                if (outFd != NULL) *outFd = fd;
+                if (outEvents != NULL) *outEvents = events;
+                if (outData != NULL) *outData = data;
+                return ident;
+            }
+        }
+        if (result != 0) {
+            if (outFd != NULL) *outFd = 0;
+            if (outEvents != NULL) *outEvents = 0;
+            if (outData != NULL) *outData = NULL;
+            return result;
+        }
+        result = pollInner(timeoutMillis);
+    }
+}
+```
+
+主要是一些对 Native 层消息机制的处理，我们暂时不关心，最后调用到了 pollInner 方法：
+
+```java
+int Looper::pollInner(int timeoutMillis) {
+    // ...
+    int result = POLL_WAKE;
+    mResponses.clear();
+    mResponseIndex = 0;
+    mPolling = true; 
+    struct epoll_event eventItems[EPOLL_MAX_EVENTS];
+    // 1
+    int eventCount = epoll_wait(mEpollFd, eventItems, EPOLL_MAX_EVENTS, timeoutMillis);
+
+    // ...
+    return result;
+}
+```
+
+可以发现，这里 1 处调用了 epoll_wait 方法，并传入我们之前在nativePollOnce 方法传入的当前时间距下个任务执行时间的差值。
+
+这就是我们的阻塞功能的核心实现了，调用该方法之后，会一直阻塞，直到到达我们设定的时间或之前我们在 epoll 中的 fd 注册的几个 fd 发生了 IO。这里可以猜到，nativeWake 方法就是通过对注册的 nWakeEventFd 进行操作从而实现的唤醒。
+
+#### Native 唤醒
+
+nativeWake 方法最后通过 NativeMessageQueue 的 wake 方法调用到了 Native 下 Looper 的 wake 方法。
+
+```java
+void Looper::wake() {
+    uint64_t inc = 1;
+    ssize_t nWrite = TEMP_FAILURE_RETRY(write(mWakeEventFd, &inc, sizeof(uint64_t)));
+    if (nWrite != sizeof(uint64_t)) {
+        if (errno != EAGAIN) {
+            ALOGW("Could not write wake signal, errno=%d", errno);
+        }
+    }
+}
+```
+
+这里其实就是调用了 write 方法，对 mWakeEventfd 中写入了 1，从而使得监听该 fd 的 pollOnce 方法被唤醒，从而使得 Java 中的 next 方法继续执行。
+
+那我们再回去看看，在什么情况下，Java 层会调用 natvieWake 方法进行唤醒呢？
+
+**MessageQueue 类中调用 nativeWake 方法主要有下列几个时机：**
+
+- **调用 MessageQueue 的 quit 方法进行退出时，会进行唤醒（让其退出）**
+- **消息入队时，若插入的消息在链表最前端（最早将执行）或者有同步屏障时插入的是最前端的异步消息（最早被执行的异步消息）**
+- **移除同步屏障时，若消息列表为空或者同步屏障后面不是异步消息时**
+
+可以发现，主要是在可能不再需要阻塞的情况下进行唤醒。（比如加入了一个更早的任务，那继续阻塞显然会影响这个任务的执行）
+
+
+
+
+
+
+
+
+
 ### 什么是 IdleHandler?
 
 答：当 MessageQueue 为空或者目前没有需要执行的 Message 时会回调的接口对象。
