@@ -330,33 +330,376 @@ public RequestManagerRetriever getRequestManagerRetriever() {
   }
   ```
 
-  
+  <font color=#8A2BE2>`RequestManagerRetriever.java`</font>
 
+  ```java
+  -> 3.1 实例化 RequestManager
+  Glide glide = Glide.get(context);
+  requestManager = factory.build(glide, current.getGlideLifecycle(), 
+      current.getRequestManagerTreeNode(), context);
   
+  RequestManager 工厂接口
+  public interface RequestManagerFactory {
+      RequestManager build(
+          Glide glide,
+          Lifecycle lifecycle,
+          RequestManagerTreeNode requestManagerTreeNode,
+          Context context);
+      }
+  
+  默认 RequestManager 工厂接口实现类
+  private static final RequestManagerFactory DEFAULT_FACTORY = new RequestManagerFactory() {
+      @Override
+      public RequestManager build(
+          Glide glide,
+          Lifecycle lifecycle,
+          RequestManagerTreeNode requestManagerTreeNode,
+          Context context) {
+              return new RequestManager(glide, lifecycle, requestManagerTreeNode, context);
+          }
+      };
+  }
+  ```
 
-  
+  <font color=#8A2BE2>`RequestManager.java`</font>
 
+  ```java
+  已简化
   
+  final Lifecycle lifecycle;
+  
+  RequestManager(Glide glide, Lifecycle lifecycle, ...){
+      ...
+      this.lifecycle = lifecycle;
+      
+      添加监听
+      lifecycle.addListener(this);
+  }
+  
+  @Override
+  public synchronized void onDestroy() {
+      ...
+      移除监听
+      lifecycle.removeListener(this);
+  }
+  ```
 
-  
+  可以看到，实例化 RequestManager 时需要一个 `com.bumptech.glide.manager.Lifecycle`对象，这个对象是在无界面 Fragment 中创建的。当 Fragment 的生命周期变化时，就是通过这个 LifeCycle 对象将事件分发到 RequestManager。
 
-  
+  <font color=#8A2BE2>`ActivityFragmentLifecycle.java`</font>
 
+  ```java
+  class ActivityFragmentLifecycle implements Lifecycle {
   
+      private final Set<LifecycleListener> lifecycleListeners =
+        Collections.newSetFromMap(new WeakHashMap<LifecycleListener, Boolean>());
+      ...
+  }
+  ```
 
-  
+  ### 2.5 生命周期回调
 
-  
+  现在我们来看 RequestManager 受到生命周期回调后的处理。
 
-  
+  <font color=#8A2BE2>`LifecycleListener.java`</font>
 
-  
+  ```java
+  public interface LifecycleListener {
+      void onStart();
+      void onStop();
+      void onDestroy();
+  }
+  ```
 
-  
+  <font color=#8A2BE2>`RequestManager.java`</font>
 
+  ```java
+  private final RequestTracker requestTracker;
   
+  public class RequestManager
+      implements ComponentCallbacks2, LifecycleListener, ... {
+  
+      @Override
+      public synchronized void onStop() {
+          1、onStop() 时暂停任务（页面不可见）
+          pauseRequests();
+          targetTracker.onStop();
+      }
+  
+      @Override
+      public synchronized void onStart() {
+          2、onStart() 时恢复任务（页面可见）
+          resumeRequests();
+          targetTracker.onStart();
+      }
+  
+      @Override
+      public synchronized void onDestroy() {
+          3、onDestroy() 时销毁任务（页面销毁）
+          targetTracker.onDestroy();
+          for (Target<?> target : targetTracker.getAll()) {
+              clear(target);
+          }
+          targetTracker.clear();
+          requestTracker.clearRequests();
+          lifecycle.removeListener(this);
+          lifecycle.removeListener(connectivityMonitor);
+          mainHandler.removeCallbacks(addSelfToLifecycle);
+          glide.unregisterRequestManager(this);
+      }
+      
+      public synchronized void pauseRequests() {
+          requestTracker.pauseRequests();
+      }
+  
+      public synchronized void resumeRequests() {
+          requestTracker.resumeRequests();
+      }
+  }
+  ```
 
+  主要关注以下几点：
+
+  - 页面不可见的时候暂停请求（onStop）
+  - 页面可见时恢复请求（onStart）
+  - 页面销毁时销毁请求（onDestroy）
+
+  ## 3、网络连接状态监听
+
+  Glide 会监听网络连接状态，并在网络重新连接时重新启动失败的请求。具体分析如下：
+
+  #### 3.1 广播监听器
+
+  <font color=#8A2BE2>`RequestManager.java`</font>
+
+  ```java
+  private final ConnectivityMonitor connectivityMonitor;
   
+  RequestManager(...){
+      ...
+      监听器
+      connectivityMonitor = factory.build(context.getApplicationContext(), new RequestManagerConnectivityListener(requestTracker));
+      ...
+  }
+  ```
+
+  可以看到，在 RequestManager 的构造器中，会构建一个 `ConnectivityMonitor` 对象。其中，默认的构建工厂是：
+
+  <font color=#8A2BE2>`DefaultConnectivityMonitorFactory.java`</font>
+
+  ```java
+  public class DefaultConnectivityMonitorFactory implements ConnectivityMonitorFactory {
+  
+      private static final String TAG = "ConnectivityMonitor";
+      private static final String NETWORK_PERMISSION = "android.permission.ACCESS_NETWORK_STATE";
+  
+      @Override
+      public ConnectivityMonitor build(Context context, ConnectivityMonitor.ConnectivityListener listener) {
+        
+          1、检查是否授予监控网络状态的权限
+          int permissionResult = ContextCompat.checkSelfPermission(context, NETWORK_PERMISSION);
+          boolean hasPermission = permissionResult == PackageManager.PERMISSION_GRANTED;
+          
+          2、实例化不同的 ConnectivityMonitor
+          return hasPermission
+              ? new DefaultConnectivityMonitor(context, listener)
+              : new NullConnectivityMonitor();
+    }
+  }
+  ```
+
+  如果有网络监听权限，则实例化`DefaultConnectivityMonitor`:
+
+  ```java
+  已简化
+  final class DefaultConnectivityMonitor implements ConnectivityMonitor {
+  
+      private final Context context;
+      final ConnectivityListener listener;
+  
+      boolean isConnected;
+      private boolean isRegistered;
+  
+      1、广播监听器
+      private final BroadcastReceiver connectivityReceiver =
+          new BroadcastReceiver() {
+              @Override
+              public void onReceive(Context context, Intent intent) {
+                  boolean wasConnected = isConnected;
+                  isConnected = isConnected(context);
+  
+                  5、状态变化，回调
+                  if (wasConnected != isConnected) {
+                      listener.onConnectivityChanged(isConnected);
+                  }
+              }
+          };
+  
+      DefaultConnectivityMonitor(Context context, ConnectivityListener listener) {
+          this.context = context.getApplicationContext();
+          this.listener = listener;
+      }
+  
+      private void register() {
+          if (isRegistered) {
+              return;
+          }
+  
+          2、注册广播监听器
+          isConnected = isConnected(context);
+          context.registerReceiver(connectivityReceiver, new IntentFilter(ConnectivityManager.CONNECTIVITY_ACTION));
+          isRegistered = true;
+      }
+  
+      private void unregister() {
+          if (!isRegistered) {
+              return;
+          }
+          
+          3、注销广播监听器
+          context.unregisterReceiver(connectivityReceiver);
+          isRegistered = false;
+      }
+  
+      4、检查网络连通性
+      boolean isConnected(Context context) {
+          ConnectivityManager connectivityManager = (ConnectivityManager) context.getSystemService(Context.CONNECTIVITY_SERVICE);
+          NetworkInfo networkInfo = connectivityManager.getActiveNetworkInfo();
+          return networkInfo.isConnected();
+      }
+  
+      @Override
+      public void onStart() {
+          页面可见时注册
+          register();
+      }
+  
+      @Override
+      public void onStop() {
+          页面不可见时注销
+          unregister();
+      }
+  
+      @Override
+      public void onDestroy() {
+          // Do nothing.
+      }
+  }
+  ```
+
+  可以看到，<font color=#8A2BE2>`[在页面可见时注册广播监听器，而在页面不可见时注销广播监听器。]`</font>
+
+  #### 3.2 网络连接变化回调
+
+  现在我们看 RequestManager 中是如何处理网络连接状态变化的。
+
+  <font color=#8A2BE2>`RequestManager.java`</font>
+
+  ```java
+  
+  private class RequestManagerConnectivityListener
+        implements ConnectivityMonitor.ConnectivityListener {
+      
+      private final RequestTracker requestTracker;
+  
+      RequestManagerConnectivityListener(RequestTracker requestTracker) {
+          this.requestTracker = requestTracker;
+      }
+  
+      @Override
+      public void onConnectivityChanged(boolean isConnected) {
+  
+          网络连接，重新开启请求
+          if (isConnected) {
+              synchronized (RequestManager.this) {
+                  requestTracker.restartRequests();
+              }
+          }
+      }
+  }
+  ```
+
+  <font color=#8A2BE2>`小结：如果应用有监控网络状态的权限，那么 Glide 会监听网络连接状态，并在网络重新连接时重新启动失败的请求`</font>
+
+  ### 4、内存状态监听
+
+  这一节我们来分析 Glide 的内存状态监听模块，具体分析如下：
+
+  <font color=#8A2BE2>`Glide.java`</font>
+
+  ```java
+  private static void initializeGlide(...) {
+      ...
+      applicationContext.registerComponentCallbacks(glide);
+  }
+  
+  1、内存紧张级别
+  @Override
+  public void onTrimMemory(int level) {
+      trimMemory(level);
+  }
+  
+  2、低内存状态
+  @Override
+  public void onLowMemory() {
+      clearMemory();
+  }
+  
+  public void trimMemory(int level) {
+      1.1 确保是主线程
+      Util.assertMainThread();
+  
+      1.2 每个 RequestManager 处理内存紧张级别
+      for (RequestManager manager : managers) {
+          manager.onTrimMemory(level);
+      }
+      
+      1.3 内存缓存处理内存紧张级别
+      memoryCache.trimMemory(level);
+      bitmapPool.trimMemory(level);
+      arrayPool.trimMemory(level);
+  }
+  
+  public void clearMemory() {
+      1.2 确保是主线程
+      Util.assertMainThread();
+  
+      1.2 内存缓存处理低内存状态
+      memoryCache.clearMemory();
+      bitmapPool.clearMemory();
+      arrayPool.clearMemory();
+  }
+  ```
+
+  <font color=#8A2BE2>`RequestManager.java`</font>
+
+  ```java
+  @Override
+  public void onTrimMemory(int level) {  //Moderate 适度的，中和的，合适的
+      if (level == TRIM_MEMORY_MODERATE && pauseAllRequestsOnTrimMemoryModerate) {
+          暂停请求
+          pauseAllRequestsRecursive();
+      }
+  }
+  ```
+
+  小结：在构建 Glide 时，会调用`registerComponentCallbacks()`进行全局注册, 系统在内存紧张的时候回调`onTrimMemory(level)`。而 Glide 则根据系统内存紧张级别（level）进行 memoryCache / bitmapPool / arrayPool 的回收，而 RequestManager 在 `TRIM_MEMORY_MODERATE` 级别会暂停请求。
+
+  ### 5、总结
+
+  - 页面生命周期
+
+    当页面不可见时暂停请求；页面可见时恢复请求；页面销毁时销毁请求。
+
+    ![](picture/5.jpg)
+
+    - **网络连接状态**
+
+    如果应用有监控网络状态的权限，那么 Glide 会监听网络连接状态，并在网络重新连接时重新启动失败的请求。
+
+    - **内存状态**
+
+    Glide 则根据系统内存紧张级别（level）进行 memoryCache / bitmapPool / arrayPool 的回收，而 RequestManager 在 `TRIM_MEMORY_MODERATE` 级别会暂停请求。
 
   
 
