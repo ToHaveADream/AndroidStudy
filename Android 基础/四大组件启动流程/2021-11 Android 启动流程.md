@@ -1073,3 +1073,357 @@ handleResumeActivity 主要做了以下事情：
 Launcher 本身也是一个应用程序，它在启动的过程中会请求 PackagerManagerService 返回系统中已经安装的 app 的信息，并将其快捷图标显示在桌面程序上，用户可以点击图标启动 app。
 
 ### 3.1 应用进程的创建
+
+当点击 app 图标后，Launcher 会在桌面 activity 内调用（此 activity 就叫做 Launcher）startActivitySafely 方法，startActivitySafely 方法会调用 startActivity 方法，接下来的部分就和上面分析的 Activity 启动的发起过程一致了，即通过 IPC 走到了 ATMS，直到 ActivityStackSupervisor 的 startSpecificActiviyLocked 方法中对应用进程是否存在的判断。一起看下：
+
+```javascript
+    void startSpecificActivityLocked(ActivityRecord r, boolean andResume, boolean checkConfig) {
+        // Is this activity's application already running?
+        final WindowProcessController wpc =
+                mService.getProcessController(r.processName, r.info.applicationInfo.uid);
+
+        boolean knownToBeDead = false;
+        if (wpc != null && wpc.hasThread()) {
+            try {
+            	//有应用进程就启动activity
+                realStartActivityLocked(r, wpc, andResume, checkConfig);
+                return;
+            } catch (RemoteException e) {
+                Slog.w(TAG, "Exception when starting activity "
+                        + r.intent.getComponent().flattenToShortString(), e);
+            }
+            knownToBeDead = true;
+        }
+
+        ...
+        
+        try {
+            if (Trace.isTagEnabled(TRACE_TAG_ACTIVITY_MANAGER)) {
+                Trace.traceBegin(TRACE_TAG_ACTIVITY_MANAGER, "dispatchingStartProcess:"
+                        + r.processName);
+            }
+            // Post message to start process to avoid possible deadlock of calling into AMS with the
+            // ATMS lock held.
+            // 上面的wpc != null && wpc.hasThread()不满足的话，说明没有进程，就会去创建进程
+            final Message msg = PooledLambda.obtainMessage(
+                    ActivityManagerInternal::startProcess, mService.mAmInternal, r.processName,
+                    r.info.applicationInfo, knownToBeDead, "activity", r.intent.getComponent());
+            mService.mH.sendMessage(msg);
+        } finally {
+            Trace.traceEnd(TRACE_TAG_ACTIVITY_MANAGER);
+        }
+    }
+```
+
+逻辑很清晰：有应用进程就启动 activity（普通 activity），没有就去创建进程（然后再启动根 Activity）。
+
+应用进程存在的判断条件是：wpc != null && wpc.hasThread()，看下 WindowProcessController 的 hasThread 方法：
+
+```javascript
+    // The actual proc...  may be null only if 'persistent' is true (in which case we are in the
+    // process of launching the app)
+    private IApplicationThread mThread;
+    
+    boolean hasThread() {
+        return mThread != null;
+    }
+```
+
+前面已有说明，IApplicationThread 是 ApplicationThread 客户端（app）在服务端（系统进程）的代理，这里判断 **IApplicationThread 不为空，就代表进程已存在**，为啥这么判断呢？这里先立个 flag，进程创建之后，一定会有给 IApplicationThread 赋值的操作，这个就符合这个逻辑了。我们继续看看进程是如何创建的，以及创建之后是否有给 IApplicationThread 赋值的操作。
+
+使用 ActivityTaskManagerService 的 mH（继承 handler) 发送了一个消息，消息中第一个参数是 ActivityManagerInternal:startProcess, :eggplant:ActivityManagerInternal 的实现是 AMS 的内部类 LocalService, LocalService 的 startProcess 方法调用了 AMS 的 startProcessLocked 方法，那么我们就看看 AMS 的 startProcessLocked 方法，这里应该就是创建进程了：
+
+```javascript
+    final ProcessRecord startProcessLocked(String processName,
+            ApplicationInfo info, boolean knownToBeDead, int intentFlags,
+            HostingRecord hostingRecord, boolean allowWhileBooting,
+            boolean isolated, boolean keepIfLarge) {
+        return mProcessList.startProcessLocked(processName, info, knownToBeDead, intentFlags,
+                hostingRecord, allowWhileBooting, isolated, 0 /* isolatedUid */, keepIfLarge,
+                null /* ABI override */, null /* entryPoint */, null /* entryPointArgs */,
+                null /* crashHandler */);
+    }
+```
+
+这里调用了 ProcessList.startProcessLocked 方法，内部又多次调用了 startProcessLocked  不同的重载方法，最后走到 startProcess 方法：
+
+```javascript
+    private Process.ProcessStartResult startProcess(HostingRecord hostingRecord, String entryPoint,
+            ProcessRecord app, int uid, int[] gids, int runtimeFlags, int mountExternal,
+            String seInfo, String requiredAbi, String instructionSet, String invokeWith,
+            long startTime) {
+        try {
+        ...
+               startResult = Process.start(entryPoint,
+                        app.processName, uid, uid, gids, runtimeFlags, mountExternal,
+                        app.info.targetSdkVersion, seInfo, requiredAbi, instructionSet,
+                        app.info.dataDir, invokeWith, app.info.packageName,
+                        new String[] {PROC_START_SEQ_IDENT + app.startSeq});
+            }
+            checkSlow(startTime, "startProcess: returned from zygote!");
+            return startResult;
+        } finally {
+            Trace.traceEnd(Trace.TRACE_TAG_ACTIVITY_MANAGER);
+        }
+    }
+```
+
+调用了 Process.start 方法，跟进看下：
+
+```javascript
+    public static ProcessStartResult start(@NonNull final String processClass,
+                                           @Nullable final String niceName,
+                                           int uid, int gid, @Nullable int[] gids,
+                                           int runtimeFlags,
+                                           int mountExternal,
+                                           int targetSdkVersion,
+                                           @Nullable String seInfo,
+                                           @NonNull String abi,
+                                           @Nullable String instructionSet,
+                                           @Nullable String appDataDir,
+                                           @Nullable String invokeWith,
+                                           @Nullable String packageName,
+                                           @Nullable String[] zygoteArgs) {
+        return ZYGOTE_PROCESS.start(processClass, niceName, uid, gid, gids,
+                    runtimeFlags, mountExternal, targetSdkVersion, seInfo,
+                    abi, instructionSet, appDataDir, invokeWith, packageName,
+                    /*useUsapPool=*/ true, zygoteArgs);
+    }
+```
+
+ZYGOTE_PROCESS 是用于保持与 Zygote 进程的通信状态，发送 socket 请求与 Zygote 进程通信。Zygote 进程是 **进程孵化器**，用于创建进程。简单介绍下：
+
+- Zygote 通过 fork 创建了一个进程
+- 在新建的进程中创建 Binder 线程池（此进程支持了 Binder IPC）
+- 最终通过反射获取到了 ActivityThread 类并执行了 main 方法
+
+#### 3.2 根 Activity 的启动
+
+ActivityThread 的 main 方法，主要就是开启了主线程的消息循环。
+
+```javascript
+    final H mH = new H();
+    
+    public static void main(String[] args) {
+        ...
+        //1、准备主线程的Looper
+        Looper.prepareMainLooper();
+
+        long startSeq = 0;
+        if (args != null) {
+            for (int i = args.length - 1; i >= 0; --i) {
+                if (args[i] != null && args[i].startsWith(PROC_START_SEQ_IDENT)) {
+                    startSeq = Long.parseLong(
+                            args[i].substring(PROC_START_SEQ_IDENT.length()));
+                }
+            }
+        }
+        //这里实例化ActivityThread，也就实例化了上面的mH，就是handler。
+        ActivityThread thread = new ActivityThread();
+        thread.attach(false, startSeq);
+
+		//获取handler
+        if (sMainThreadHandler == null) {
+            sMainThreadHandler = thread.getHandler();
+        }
+
+        ...
+        //主线程looper开启
+        Looper.loop();
+		//因为主线程的Looper是不能退出的，退出就无法接受事件了。一旦意外退出，会抛出异常
+        throw new RuntimeException("Main thread loop unexpectedly exited");
+    }
+```
+
+在这里，我们关注 这两行代码：
+
+```java
+        ActivityThread thread = new ActivityThread();
+        thread.attach(false, startSeq);
+```
+
+创建ActivityThread实例，同时会创建ApplicationThread实例，ApplicationThread实例是ActivityThread实例的属性。然后调用了attach方法：
+
+```java
+    private void attach(boolean system, long startSeq) {
+        sCurrentActivityThread = this;
+        mSystemThread = system;
+        if (!system) {
+            android.ddm.DdmHandleAppName.setAppName("<pre-initialized>",
+                                                    UserHandle.myUserId());
+            RuntimeInit.setApplicationObject(mAppThread.asBinder());
+            final IActivityManager mgr = ActivityManager.getService();
+            try {
+            	//把ApplicationThread实例关联到AMS中
+                mgr.attachApplication(mAppThread, startSeq);
+            } catch (RemoteException ex) {
+                throw ex.rethrowFromSystemServer();
+            }
+            ...
+        } 
+        ...
+    }
+```
+
+前面提到过这里mgr就是AMS在客户端的代理，所以mgr的attachApplication方法，就是IPC的走到AMS的attachApplication方法了：
+
+```javascript
+    public final void attachApplication(IApplicationThread thread, long startSeq) {
+        synchronized (this) {
+            int callingPid = Binder.getCallingPid();
+            final int callingUid = Binder.getCallingUid();
+            final long origId = Binder.clearCallingIdentity();
+            attachApplicationLocked(thread, callingPid, callingUid, startSeq);
+            Binder.restoreCallingIdentity(origId);
+        }
+    }
+```
+
+attachApplicationLocked方法很长，这里保留重要的几点：
+
+```javascript
+private final boolean attachApplicationLocked(IApplicationThread thread,
+            int pid, int callingUid, long startSeq) {
+
+			...
+				//1、IPC操作，创建绑定Application
+                thread.bindApplication(processName, appInfo, providers, null, profilerInfo,
+                        null, null, null, testMode,
+                        mBinderTransactionTrackingEnabled, enableTrackAllocation,
+                        isRestrictedBackupMode || !normalMode, app.isPersistent(),
+                        new Configuration(app.getWindowProcessController().getConfiguration()),
+                        app.compat, getCommonServicesLocked(app.isolated),
+                        mCoreSettingsObserver.getCoreSettingsLocked(),
+                        buildSerial, autofillOptions, contentCaptureOptions);
+			...
+            // 2、赋值IApplicationThread
+            app.makeActive(thread, mProcessStats);
+			...
+			
+        // See if the top visible activity is waiting to run in this process...
+        if (normalMode) {
+            try {
+            	//3、通过ATMS启动 根activity
+                didSomething = mAtmInternal.attachApplication(app.getWindowProcessController());
+            } catch (Exception e) {
+                Slog.wtf(TAG, "Exception thrown launching activities in " + app, e);
+                badApp = true;
+            }
+        }
+		...
+}
+```
+
+AMS 的 attachApplicationLocked 方法主要三件事：
+
+- 通过 IApplciationThread 的 bindApplciation 方法，IPC 操作，创建绑定 application
+- 通过 makeActive 赋值 IApplicationThread，即验证了上面的猜测
+- 通过ATMS 启动 根 Activity
+
+先看 makeActive 方法：
+
+```java
+    public void makeActive(IApplicationThread _thread, ProcessStatsService tracker) {
+        ...
+        thread = _thread;
+        mWindowProcessController.setThread(thread);
+    }
+```
+
+看到使用mWindowProcessController.setThread(thread)确实完成了IApplicationThread的赋值。这样就可以依据IApplicationThread是否为空判断进程是否存在了。
+
+再看创建绑定 Application 的过程：IApplicationThread 的 bindApplication 方法实现是客户端的 ApplicationThread 的 bindApplication 方法，它又使用 H 转移到了 ActivityThread 的 handleBindApplication 方法（从 binder 线程池转移到了主线程），看下 handleBindApplciation  方法：
+
+```javascript
+private void handleBindApplication(AppBindData data) {
+	...
+	            final LoadedApk pi = getPackageInfo(instrApp, data.compatInfo,
+                    appContext.getClassLoader(), false, true, false);
+            final ContextImpl instrContext = ContextImpl.createAppContext(this, pi,
+                    appContext.getOpPackageName());
+            try {
+            	//创建Instrumentation
+                final ClassLoader cl = instrContext.getClassLoader();
+                mInstrumentation = (Instrumentation)
+                    cl.loadClass(data.instrumentationName.getClassName()).newInstance();
+            } 
+            ...
+            final ComponentName component = new ComponentName(ii.packageName, ii.name);
+            mInstrumentation.init(this, instrContext, appContext, component,
+                    data.instrumentationWatcher, data.instrumentationUiAutomationConnection);
+	...
+			//创建Application
+            app = data.info.makeApplication(data.restrictedBackupMode, null);
+	...
+            mInitialApplication = app;
+            try {
+                mInstrumentation.onCreate(data.instrumentationArgs);
+            }
+    ...
+            try {
+            	//内部调用Application的onCreate方法
+                mInstrumentation.callApplicationOnCreate(app);
+            }
+	...
+}
+```
+
+主要就是创建 Application，并且调用生命周期 onCreate 方法。也就是说。正常情况下 Application 的初始化是在 handleBindApplication 方法中的，并且是在创建进程之后。performLaunchActivity 中只是做了一个检测，异常情况 Application 不存在的情况会创建。
+
+这里注意一点，创建 Application 后，内部会调用 attach 方法，attach 内部会调用 attachBaseContext 方法，attachBaseContext 方法是我们能接触到的一个方法，接着才是 onCreate 方法。
+
+再来看 根 activity 的启动，回到上面 AMS 的 attachApplicationLocked 方法，调用了 mAtmInternal.attachApplication 方法，mAtmInternal 是 ActivityTaskManagerInternal 实例，具体实现是在 ActivityTaskManagerService 的内部类 LocalService, 去看看：
+
+```javascript
+//ActivityTaskManagerService#LocalService
+        public boolean attachApplication(WindowProcessController wpc) throws RemoteException {
+            synchronized (mGlobalLockWithoutBoost) {
+                return mRootActivityContainer.attachApplication(wpc);
+            }
+        }
+```
+
+mRootActivityContainer 是 RootActivityContainer 实例，看下它的 attachApplication 方法：
+
+```javascript
+    boolean attachApplication(WindowProcessController app) throws RemoteException {
+        final String processName = app.mName;
+        boolean didSomething = false;
+        for (int displayNdx = mActivityDisplays.size() - 1; displayNdx >= 0; --displayNdx) {
+            final ActivityDisplay display = mActivityDisplays.get(displayNdx);
+            final ActivityStack stack = display.getFocusedStack();
+            if (stack != null) {
+                stack.getAllRunningVisibleActivitiesLocked(mTmpActivityList);
+                final ActivityRecord top = stack.topRunningActivityLocked();
+                final int size = mTmpActivityList.size();
+                for (int i = 0; i < size; i++) {
+                    final ActivityRecord activity = mTmpActivityList.get(i);
+                    if (activity.app == null && app.mUid == activity.info.applicationInfo.uid
+                            && processName.equals(activity.processName)) {
+                        try {
+                            if (mStackSupervisor.realStartActivityLocked(activity, app,
+                                    top == activity /* andResume */, true /* checkConfig */)) {
+                                didSomething = true;
+                            }
+                        } 
+                        ...
+                    }
+                }
+            }
+        }
+        if (!didSomething) {
+            ensureActivitiesVisible(null, 0, false /* preserve_windows */);
+        }
+        return didSomething;
+    }
+```
+
+遍历 activity 栈，此时理论上应该只有一个根 activity，然后调用 mStackSupervisor.realStartActivityLocked 方法，看到这里我们直到了，这里开始走上面的流程了。
+
+我们发现，**根activity的启动前 需要创建应用进程，然后走到ActivityThread的main方法，开启主线程循环，初始化并绑定Application、赋值IApplicationThread，最后真正的启动过程和普通Activity是一致的。**
+
+![](/picture/fragment08.png)
+
+# 总结
+
+以上的流程就是这样，接下来分析：Window 编舞者 网络框架 compose view 等知识。
