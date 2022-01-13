@@ -81,7 +81,7 @@ Recycler 回收 ViewHolder 的规则为：
 - 如果 mCacheViews 未达到最大 的 size,则该 ViewHoler 被添加到 mCacheViews 中；如果已经达到最大值，则 移除 mCacheViews 中被先 add 的 ViewHolder，再将待回收的 ViewHolder 添加到 mCacheViews 中
 - 如果 mCacheViews 达到最大值，则被其移除的 ViewHolder 会尝试 添加到 mRecyclerPool 中，如果可以存放，则直接 add，否则直接抛弃
 
-![](/picture/05.awebp)
+![](picture/05.awebp)
 
 ### 3.34 Recycler 获取 View
 
